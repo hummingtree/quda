@@ -3,18 +3,24 @@
 #define EVEN_MORE_GENERIC_DSLASH(FUNC, FLOAT, DAG, X, kernel_type, gridDim, blockDim, shared, stream, param) \
   if (x==0) {								\
     if (reconstruct == QUDA_RECONSTRUCT_NO) {				\
+      cudaFuncSetAttribute( FUNC ## FLOAT ## 18 ## DAG ## Kernel<kernel_type>, cudaFuncAttributePreferredSharedMemoryCarveout, (int)cudaSharedmemCarveoutMaxL1); \
       FUNC ## FLOAT ## 18 ## DAG ## Kernel<kernel_type><<<gridDim, blockDim, shared, stream>>> (param); \
     } else if (reconstruct == QUDA_RECONSTRUCT_12) {			\
+      cudaFuncSetAttribute( FUNC ## FLOAT ## 12 ## DAG ## Kernel<kernel_type>, cudaFuncAttributePreferredSharedMemoryCarveout, (int)cudaSharedmemCarveoutMaxL1); \
       FUNC ## FLOAT ## 12 ## DAG ## Kernel<kernel_type><<<gridDim, blockDim, shared, stream>>> (param); \
     } else if (reconstruct == QUDA_RECONSTRUCT_8) {			\
+      cudaFuncSetAttribute( FUNC ## FLOAT ## 8 ## DAG ## Kernel<kernel_type>, cudaFuncAttributePreferredSharedMemoryCarveout, (int)cudaSharedmemCarveoutMaxL1); \
       FUNC ## FLOAT ## 8 ## DAG ## Kernel<kernel_type><<<gridDim, blockDim, shared, stream>>> (param); \
     }									\
   } else {								\
     if (reconstruct == QUDA_RECONSTRUCT_NO) {				\
+      cudaFuncSetAttribute( FUNC ## FLOAT ## 18 ## DAG ## X ## Kernel<kernel_type>, cudaFuncAttributePreferredSharedMemoryCarveout, (int)cudaSharedmemCarveoutMaxL1); \
       FUNC ## FLOAT ## 18 ## DAG ## X ## Kernel<kernel_type><<<gridDim, blockDim, shared, stream>>> (param); \
     } else if (reconstruct == QUDA_RECONSTRUCT_12) {			\
+      cudaFuncSetAttribute( FUNC ## FLOAT ## 12 ## DAG ## X ## Kernel<kernel_type>, cudaFuncAttributePreferredSharedMemoryCarveout, (int)cudaSharedmemCarveoutMaxL1); \
       FUNC ## FLOAT ## 12 ## DAG ## X ## Kernel<kernel_type><<<gridDim, blockDim, shared, stream>>> (param); \
     } else if (reconstruct == QUDA_RECONSTRUCT_8) {			\
+      cudaFuncSetAttribute( FUNC ## FLOAT ## 8 ## DAG ## X ## Kernel<kernel_type>, cudaFuncAttributePreferredSharedMemoryCarveout, (int)cudaSharedmemCarveoutMaxL1); \
       FUNC ## FLOAT ## 8 ## DAG ## X ## Kernel<kernel_type> <<<gridDim, blockDim, shared, stream>>> (param); \
     }									\
   }
