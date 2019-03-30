@@ -297,7 +297,7 @@ namespace quda {
       max = lh.y;
     }
   }
-  
+
   // Actually does more than the function name suggests.
   // will find the maximum absolute value among the vector, scale that, and store to sm_b
   template<int N_sm_d2, bool acc, class Vector>
@@ -433,6 +433,86 @@ namespace quda {
       int c_col = warp_n*WMMA_N;
 
       nvcuda::wmma::store_matrix_sync(sm_c+c_col+c_row*N_sm, c_frag, N_sm, nvcuda::wmma::mem_row_major);
+    }
+  } 
+  
+  template<int block_dim_x, int Ls, int M, int N, int M_sm, int N_sm> 
+  __device__ inline void mma_sync_gemm(half* sm_a, half* sm_b, half* sm_c){
+    constexpr int WMMA_M = 16;
+    constexpr int WMMA_N = 16;
+    constexpr int WMMA_K = 16;
+    
+    constexpr int tm_dim = M/WMMA_M;
+    constexpr int tn_dim = N/WMMA_N;
+    
+    constexpr int total_warp = block_dim_x*Ls_ >> 32;
+    
+    static_assert( (tm_dim*tn_dim)%total_warp==0, "(tm_dim*tn_dim)%%total_warp==0\n" );
+    static_assert( tn_dim%(tm_dim*tn_dim/total_warp)==0, "tn_dim%%(tm_dim*tn_dim/total_warp)==0\n" );
+    
+    constexpr int total_tile = tm_dim*tn_dim;
+    
+    constexpr int warp_cycle = total_tile/total_warp;
+  
+    const int this_warp = (threadIdx.y*block_dim_x+threadIdx.x) >> 5;
+    const int warp_m = this_warp*warp_cycle/tn_dim;
+    
+    #pragma unroll
+    for(int c = 0; c < warp_cycle; c++){
+    
+      // registers to hold the accumulation c 
+      asm volatile(".reg .u32 $rc<4>;");
+      // set them all the zero
+      asm volatile(
+        "mov.u32 $rc0, 0x0U;\n\t" 
+        "mov.u32 $rc1, 0x0U;\n\t" 
+        "mov.u32 $rc2, 0x0U;\n\t" 
+        "mov.u32 $rc3, 0x0U;"
+      );
+ 
+      // The logical warp assigned to each part of the matrix.
+      const int phys_warp_index = this_warp*warp_cycle+c;
+      const int warp_n = phys_warp_index-warp_m*tn_dim;
+      // eg. for 12 warps:
+      // 000|111|222|333
+      // 444|555|666|777
+      // 888|999|000|111
+      
+      // Zero the initial acc.
+      nvcuda::wmma::fill_fragment(c_frag, static_cast<half>(0.0f));
+      
+      #pragma unroll
+      for( int k = 0; k < tm_dim; k++ ){
+        const int a_row = warp_m*WMMA_M;
+        const int a_col = k*WMMA_K;
+        const int b_row = k*WMMA_K;
+        const int b_col = warp_n*WMMA_N;
+    
+           
+        // performa the mma.sync
+        #pragma unroll
+        for(int kC = 0; kC < 4; kC++){
+          unsigned* A = reinterpret_cast<unsigned*>(sm_a);
+          unsigned* B = reinterpret_cast<unsigned*>(sm_b);
+          // TODO: find the correct value for pointer A and B.
+          asm volatile("mma.sync.aligned.m8n8k4.col.row.f16.f16.f16.f16 {$rc0,$rc1,$rc2,$rc3}, {%0,%1}, {%2,%3}, {$rc0,$rc1,$rc2,$rc3};"
+            : : "r"(A[0]), "r"(A[1]), "r"(B[0]), "r"(B[1]));
+        }
+      } 
+    
+      __syncthreads();
+      
+      int c_row = warp_m*WMMA_M;
+      int c_col = warp_n*WMMA_N;
+        
+      unsigned *C = reinterpret_cast<unsigned const *>(sm_c);
+      // TODO: find the correct value for pointer C.
+
+      // Now store the results to shared memory
+      asm volatile("st.shared.u32 [%0+0], $rc0;\n\t" 
+                   "st.shared.u32 [%0+1], $rc1;\n\t" 
+                   "st.shared.u32 [%0+2], $rc2;\n\t" 
+                   "st.shared.u32 [%0+3], $rc3;" : : "l"(C) : "memory");
     }
   } 
 
