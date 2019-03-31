@@ -212,20 +212,20 @@ namespace quda {
 #pragma unroll
       for (int d = 0; d < 4; d++) { coordinate[d] += shift[d]; }
     }
-
+#if 0
     /**
       @brief Tensor core kernel for applying Wilson hopping term and then the beta + alpha*M5inv operator
       The kernels type(type_) will be specified in some documentations.
     */
-    template <class storage_type, int block_dim_x, int Ls_, int minBlocksPerMultiprocessor, bool reload, class Arg,
+    template <class storage_type, int block_dim_x, int Ls, int minBlocksPerMultiprocessor, bool reload, class Arg,
         int type_>
-    __global__ void __launch_bounds__(block_dim_x* Ls_, minBlocksPerMultiprocessor) fused_tensor_core(Arg arg)
+    __global__ void __launch_bounds__(block_dim_x*Ls, minBlocksPerMultiprocessor) fused_tensor_core(Arg arg)
     {
       const int explicit_parity = arg.nParity == 2 ? arg.parity : 0;
 
       TensorCoreSharedMemory<half2> shared_memory_data;
 
-      constexpr int M = 4 * Ls_;
+      constexpr int M = 4 * Ls;
       constexpr int N = 6 * block_dim_x;
 
       constexpr int sm_m_pad_size = 0;
@@ -242,15 +242,15 @@ namespace quda {
       half* sm_a_black = sm_a + M * M_sm;
 
       if (type_ == 0) {
-        construct_matrix_a_m5inv<block_dim_x, Ls_, M_sm, false, Arg>(arg, sm_a); // dagger = false
+        construct_matrix_a_m5inv<block_dim_x, Ls, M_sm, false, Arg>(arg, sm_a); // dagger = false
       } else if (type_ == 2) {
-        construct_matrix_a_m5inv<block_dim_x, Ls_, M_sm, true, Arg>(arg, sm_a); // dagger =  true
+        construct_matrix_a_m5inv<block_dim_x, Ls, M_sm, true, Arg>(arg, sm_a); // dagger =  true
       } else if (type_ == 1) {
-        construct_matrix_a_m5inv<block_dim_x, Ls_, M_sm, false, Arg>(arg, sm_a); // dagger = false
+        construct_matrix_a_m5inv<block_dim_x, Ls, M_sm, false, Arg>(arg, sm_a); // dagger = false
       } else if (type_ == 3) {
-        construct_matrix_a_d5<block_dim_x, Ls_, M_sm, true, Arg>(arg, sm_a); // dagger =  true
+        construct_matrix_a_d5<block_dim_x, Ls, M_sm, true, Arg>(arg, sm_a); // dagger =  true
       } else if (type_ == 4) {
-        construct_matrix_a_d5<block_dim_x, Ls_, M_sm, false, Arg>(arg, sm_a); // dagger =  true
+        construct_matrix_a_d5<block_dim_x, Ls, M_sm, false, Arg>(arg, sm_a); // dagger =  true
       }
       __syncthreads();
 
@@ -265,7 +265,7 @@ namespace quda {
       constexpr int tm_dim = M / WMMA_M;
       constexpr int tn_dim = N / WMMA_N;
 
-      constexpr int total_warp = block_dim_x * Ls_ >> 5;
+      constexpr int total_warp = block_dim_x * Ls >> 5;
       const int this_warp = (threadIdx.y * block_dim_x + threadIdx.x) >> 5;
 
       constexpr int total_tile = tm_dim * tn_dim;
@@ -292,7 +292,7 @@ namespace quda {
       if (type_ == 1) {
         arg.alpha = 1.;
         if (!reload) { // in the preload case we preload ...
-          construct_matrix_a_m5inv<block_dim_x, Ls_, M_sm, true, Arg>(arg, sm_a); // dagger = true
+          construct_matrix_a_m5inv<block_dim_x, Ls, M_sm, true, Arg>(arg, sm_a); // dagger = true
           __syncthreads();
 #pragma unroll
           for (int k = 0; k < tm_dim; k++) {
@@ -302,7 +302,7 @@ namespace quda {
             nvcuda::wmma::load_matrix_sync(a_frag_black[k], sm_c + a_row + a_col * M_sm, M_sm);
           }
         } else {
-          construct_matrix_a_m5inv<block_dim_x, Ls_, M_sm, true, Arg>(arg, sm_a_black); // dagger = true
+          construct_matrix_a_m5inv<block_dim_x, Ls, M_sm, true, Arg>(arg, sm_a_black); // dagger = true
           __syncthreads();
         }
       }
@@ -338,7 +338,8 @@ namespace quda {
         }
 
         __syncthreads();
-        wmma_gemm<block_dim_x, Ls_, M, N, M_sm, N_sm, reload>(a_frag, sm_a, sm_c, sm_c);
+        // wmma_gemm<block_dim_x, Ls, M, N, M_sm, N_sm, reload>(a_frag, sm_a, sm_c, sm_c);
+        mma_sync_gemm<block_dim_x, Ls, M, N, M_sm, N_sm>(sm_a, sm_c, sm_c);
         __syncthreads();
 
         if (type_ == 1) {
@@ -357,7 +358,7 @@ namespace quda {
             store_matrix_c<storage_type, N_sm>(arg.y, sm_b, sid, arg.scale * arg.m_scale);
           }
           __syncthreads();
-          wmma_gemm<block_dim_x, Ls_, M, N, M_sm, N_sm, reload>(a_frag_black, sm_a_black, sm_c, sm_c);
+          wmma_gemm<block_dim_x, Ls, M, N, M_sm, N_sm, reload>(a_frag_black, sm_a_black, sm_c, sm_c);
           __syncthreads();
 
         } else if (type_ == 3) {
@@ -381,7 +382,133 @@ namespace quda {
 
       } // while
     }
+#else
+    /**
+      @brief Tensor core kernel for applying Wilson hopping term and then the beta + alpha*M5inv operator
+      The kernels type(type_) will be specified in some documentations.
+    */
+    template <class storage_type, int block_dim_x, int Ls, int minBlocksPerMultiprocessor, bool reload, class Arg,
+        int type_>
+    __global__ void __launch_bounds__(block_dim_x*Ls, minBlocksPerMultiprocessor) fused_tensor_core(Arg arg)
+    {
+      const int explicit_parity = arg.nParity == 2 ? arg.parity : 0;
 
+      TensorCoreSharedMemory<half2> shared_memory_data;
+
+      constexpr int M = 4 * Ls;
+      constexpr int N = 6 * block_dim_x;
+
+      constexpr int sm_m_pad_size = 0;
+      constexpr int sm_n_pad_size = 16;
+
+      constexpr int N_sm = N + sm_n_pad_size;
+      constexpr int M_sm = M + sm_m_pad_size;
+
+      half2* sm_b = shared_memory_data;
+      half* sm_c = reinterpret_cast<half*>(sm_b);
+
+      half* sm_a = sm_c + M * N_sm;
+      // This is for type == 1 ONLY.
+      half* sm_a_black = sm_a + M * M_sm;
+
+      if (type_ == 0) {
+        construct_matrix_a_m5inv<block_dim_x, Ls, M_sm, false, Arg>(arg, sm_a); // dagger = false
+      } else if (type_ == 2) {
+        construct_matrix_a_m5inv<block_dim_x, Ls, M_sm, true, Arg>(arg, sm_a); // dagger =  true
+      } else if (type_ == 1) {
+        construct_matrix_a_m5inv<block_dim_x, Ls, M_sm, false, Arg>(arg, sm_a); // dagger = false
+      } else if (type_ == 3) {
+        construct_matrix_a_d5<block_dim_x, Ls, M_sm, true, Arg>(arg, sm_a); // dagger =  true
+      } else if (type_ == 4) {
+        construct_matrix_a_d5<block_dim_x, Ls, M_sm, false, Arg>(arg, sm_a); // dagger =  true
+      }
+      __syncthreads();
+
+      bool idle = false;
+      int s4_shift_base = blockIdx.x * blockDim.x; // base.
+      int s4_shift, sid;
+
+      if (type_ == 1) {
+        arg.alpha = 1.;
+        construct_matrix_a_m5inv<block_dim_x, Ls, M_sm, true, Arg>(arg, sm_a_black); // dagger = true
+        __syncthreads();
+      }
+
+      while (s4_shift_base < arg.volume_4d_cb_shift) {
+        int x[4];
+        s4_shift = s4_shift_base + threadIdx.x;
+        coordinate_from_shrinked_index(x, s4_shift, arg.shrinked_dim, arg.shift, arg.parity);
+        sid = threadIdx.y * arg.volume_4d_cb + index_4d_cb_from_coordinate_4d(x, arg.dim);
+
+        if (s4_shift >= arg.volume_4d_cb_shift) { idle = true; }
+
+        typedef typename mapper<storage_type>::type real;
+        typedef ColorSpinor<real, 3, 4> Vector;
+
+        if (!idle) {
+          Vector in_vec;
+          // the Wilson hopping terms
+          if (type_ == 0) {
+            apply_wilson_5d<storage_type, false, true>(in_vec, x, arg, threadIdx.y); // dagger = false; halo =  true
+          } else if (type_ == 2) {
+            apply_wilson_5d<storage_type, true, false>(in_vec, x, arg, threadIdx.y); // dagger =  true; halo = false
+          } else if (type_ == 1) {
+            apply_wilson_5d<storage_type, false, true>(in_vec, x, arg, threadIdx.y); // dagger = false; halo =  true
+          } else if (type_ == 3) {
+            apply_wilson_5d<storage_type, true, false>(in_vec, x, arg, threadIdx.y); // dagger =  true; halo = false
+          } else if (type_ == 4) {
+            int sid_shift = threadIdx.y * arg.volume_4d_cb_shift + s4_shift;
+            in_vec = arg.in(sid_shift, explicit_parity);
+          }
+          // store result to shared memory
+          load_matrix_b_vector<N_sm / 2, false>(in_vec, sm_b, arg.scale); // acc(accumulation) = false
+        }
+
+        __syncthreads();
+        mma_sync_gemm<block_dim_x, Ls, M, N, M_sm, N_sm>(sm_a, sm_c, sm_c);
+        __syncthreads();
+
+        if (type_ == 1) {
+
+          if (!idle) {
+            constexpr int in_x_shift = 2;
+            int back_x[4] = {x[0] - in_x_shift, x[1] - in_x_shift, x[2] - in_x_shift, x[3] - in_x_shift};
+            int back_dim[4] = {arg.dim[0] - in_x_shift*2, arg.dim[1] - in_x_shift*2, arg.dim[2] - in_x_shift*2, arg.dim[3] - in_x_shift*2};
+            if (back_x[0] >= 0 && back_x[0] < back_dim[0] && back_x[1] >= 0 && back_x[1] < back_dim[1] && back_x[2] >= 0
+                && back_x[2] < back_dim[2] && back_x[3] >= 0 && back_x[3] < back_dim[3]) {
+              int volume_4d_cb_back = back_dim[0] * back_dim[1] * back_dim[2] * back_dim[3] >> 1;
+              int sid_back_shift = threadIdx.y * volume_4d_cb_back + index_4d_cb_from_coordinate_4d(back_x, back_dim);
+              Vector aux_in_vec = arg.x(sid_back_shift, explicit_parity);
+              load_matrix_b_vector<N_sm / 2, true>(aux_in_vec, sm_b, arg.scale * arg.m_scale); // acc = true
+            }
+            store_matrix_c<storage_type, N_sm>(arg.y, sm_b, sid, arg.scale * arg.m_scale);
+          }
+          __syncthreads();
+          mma_sync_gemm<block_dim_x, Ls, M, N, M_sm, N_sm>(sm_a_black, sm_c, sm_c);
+          __syncthreads();
+
+        } else if (type_ == 3) {
+
+          if (!idle) {
+            Vector aux_in_vec = arg.x(sid, explicit_parity);
+            load_matrix_b_vector<N_sm / 2, true>(aux_in_vec, sm_b, arg.scale * arg.m_scale);
+          }
+        }
+
+        if (type_ == 3) {
+          if (!idle) {
+            int sid_shift = threadIdx.y * arg.volume_4d_cb_shift + s4_shift;
+            store_matrix_c<storage_type, N_sm>(arg.out, sm_b, sid_shift, arg.scale * arg.m_scale);
+          }
+        } else {
+          if (!idle) { store_matrix_c<storage_type, N_sm>(arg.out, sm_b, sid, arg.scale * arg.m_scale); }
+        }
+
+        s4_shift_base += gridDim.x * blockDim.x;
+
+      } // while
+    }
+#endif
     template <class storage_type, int Ls_, class Arg> class FusedDslash : public TunableVectorYZ {
 
   protected:
@@ -438,7 +565,8 @@ namespace quda {
 
       unsigned int shared_bytes_per_block(const TuneParam& param) const {
         // (Ls*4) by (Ls*4), (Ls*4) by (volume_4d*6 + 16)
-        if (param.aux.x == 1) { // aux.x == 1 --> reload == true
+        // if (param.aux.x == 1) { // aux.x == 1 --> reload == true
+        if (true) { // aux.x == 1 --> reload == true
           if (arg.type == 1) {
             return ((param.block.y * 4) * (param.block.y * 4 + 0) * 2 + (param.block.y * 4) * (param.block.x * 6 + 16))
                 * sizeof(half);
