@@ -83,32 +83,37 @@ namespace quda {
   // (spin,Ls) by (spin,Ls), where left most index is the fastest changing one(spin).
   // x by y
   template<int block_dim_x, int Ls_, int M_sm, bool dagger, class Arg>
-  __device__ inline void construct_matrix_a_m5inv(Arg& arg, half* sm_a, 
-      const float* mp = nullptr, const float* mm = nullptr){
-    const float k = arg.kappa;
+  __device__ inline void construct_matrix_a_m5inv(Arg& arg, half* sm_a, const float* pow_table = nullptr){
     // if we rescale, then the actual matrix is alpha*m5inv+beta.
     // Otherwise a = 1., b = 0.;
     const float b = arg.beta; 
     
-    const float inv = arg.alpha*arg.fac_inv;
-
     int offset_k = threadIdx.y*4;
     int x = threadIdx.x;
     
     while(x < Ls_){
-      int offset_m = x*4;
+      int offset_m = x*2;
       float factorR, factorL;
-    
-      if(mp && mm){
+      int exp;
+      if(pow_table){
         if(dagger){
-          factorR = mp[x*Ls_+threadIdx.y];
-          factorL = mm[x*Ls_+threadIdx.y];
+          exp = x>threadIdx.y ? Ls_-x+threadIdx.y : threadIdx.y-x;
+          factorR = pow_table[exp]*(x>threadIdx.y ? -arg.m_f : 1.f);
         }else{
-          factorR = mp[threadIdx.y*Ls_+x];
-          factorL = mm[threadIdx.y*Ls_+x];
+          exp = x<threadIdx.y ? Ls_-threadIdx.y+x : x-threadIdx.y;
+          factorR = pow_table[exp]*(x<threadIdx.y ? -arg.m_f : 1.f);
+        }
+        
+        if(dagger){
+          exp = x<threadIdx.y ? Ls_-threadIdx.y+x : x-threadIdx.y;
+          factorL = pow_table[exp]*(x<threadIdx.y ? -arg.m_f : 1.f);
+        }else{
+          exp = x>threadIdx.y ? Ls_-x+threadIdx.y : threadIdx.y-x;
+          factorL = pow_table[exp]*(x>threadIdx.y ? -arg.m_f : 1.f);
         }
       }else{
-        int exp;
+        const float k = arg.kappa;
+        const float inv = arg.alpha*arg.fac_inv;
         if(dagger){
           exp = x>threadIdx.y ? Ls_-x+threadIdx.y : threadIdx.y-x;
           factorR = inv*powf(k, __int2float_rn(exp))*(x>threadIdx.y ? -arg.m_f : 1.f);
@@ -126,34 +131,24 @@ namespace quda {
         }
       }
 
-      float RpL = factorR + factorL;
+      float RpL = x==threadIdx.y ? factorR+factorL+b : factorR+factorL;
       float RmL = factorR - factorL;
       
       // exp = 0 means we are on the diagonal.
-      sm_a[ (offset_k+0)*(M_sm)+(offset_m+0) ] = x==threadIdx.y ? RpL+b : RpL;
-      sm_a[ (offset_k+1)*(M_sm)+(offset_m+1) ] = x==threadIdx.y ? RpL+b : RpL;
-      sm_a[ (offset_k+2)*(M_sm)+(offset_m+2) ] = x==threadIdx.y ? RpL+b : RpL;
-      sm_a[ (offset_k+3)*(M_sm)+(offset_m+3) ] = x==threadIdx.y ? RpL+b : RpL;
-        
-      // sm_a[ (offset_k+0)*(M_sm)+(offset_m+0) ] = factorR + factorL;
-      sm_a[ (offset_k+0)*(M_sm)+(offset_m+1) ] = static_cast<half>(0.0f);
-      sm_a[ (offset_k+0)*(M_sm)+(offset_m+2) ] = RmL;
-      sm_a[ (offset_k+0)*(M_sm)+(offset_m+3) ] = static_cast<half>(0.0f);
+     
+      half2* A = reinterpret_cast<half2*>(sm_a);
+
+      A[ (offset_k+0)*(M_sm/2)+(offset_m+0) ] = __floats2half2_rn(RpL, 0.0f);
+      A[ (offset_k+0)*(M_sm/2)+(offset_m+1) ] = __floats2half2_rn(RmL, 0.0f);
       
-      sm_a[ (offset_k+1)*(M_sm)+(offset_m+0) ] = static_cast<half>(0.0f);
-      // sm_a[ (offset_k+1)*(M_sm)+(offset_m+1) ] = factorR + factorL;
-      sm_a[ (offset_k+1)*(M_sm)+(offset_m+2) ] = static_cast<half>(0.0f);
-      sm_a[ (offset_k+1)*(M_sm)+(offset_m+3) ] = RmL;
+      A[ (offset_k+1)*(M_sm/2)+(offset_m+0) ] = __floats2half2_rn(0.0f, RpL);
+      A[ (offset_k+1)*(M_sm/2)+(offset_m+1) ] = __floats2half2_rn(0.0f, RmL);
       
-      sm_a[ (offset_k+2)*(M_sm)+(offset_m+0) ] = RmL;
-      sm_a[ (offset_k+2)*(M_sm)+(offset_m+1) ] = static_cast<half>(0.0f);
-      // sm_a[ (offset_k+2)*(M_sm)+(offset_m+2) ] = factorR + factorL;
-      sm_a[ (offset_k+2)*(M_sm)+(offset_m+3) ] = static_cast<half>(0.0f);
+      A[ (offset_k+2)*(M_sm/2)+(offset_m+0) ] = __floats2half2_rn(RmL, 0.0f);
+      A[ (offset_k+2)*(M_sm/2)+(offset_m+1) ] = __floats2half2_rn(RpL, 0.0f);
       
-      sm_a[ (offset_k+3)*(M_sm)+(offset_m+0) ] = static_cast<half>(0.0f);
-      sm_a[ (offset_k+3)*(M_sm)+(offset_m+1) ] = RmL;
-      sm_a[ (offset_k+3)*(M_sm)+(offset_m+2) ] = static_cast<half>(0.0f);
-      // sm_a[ (offset_k+3)*(M_sm)+(offset_m+3) ] = factorR + factorL; 
+      A[ (offset_k+3)*(M_sm/2)+(offset_m+0) ] = __floats2half2_rn(0.0f, RmL);
+      A[ (offset_k+3)*(M_sm/2)+(offset_m+1) ] = __floats2half2_rn(0.0f, RpL);
     
       x += block_dim_x;
     }
@@ -173,7 +168,7 @@ namespace quda {
     int x = threadIdx.x;
     
     while(x < Ls_){
-      int offset_m = x*4;
+      int offset_m = x*2;
       int exp = x-threadIdx.y;
       float factorR, factorL;
       
@@ -189,34 +184,23 @@ namespace quda {
         factorL = (exp==-1?1.f:(exp==+Ls_-1?-arg.m_f:0.f)); 
       }
       
-      float RpL = arg.alpha*(factorR + factorL);
-      float RmL = arg.alpha*(factorR - factorL);
-         
       // exp = 0 means we are on the diagonal.
-      sm_a[ (offset_k+0)*(M_sm)+(offset_m+0) ] = exp==0 ? RpL+b : RpL;
-      sm_a[ (offset_k+1)*(M_sm)+(offset_m+1) ] = exp==0 ? RpL+b : RpL;
-      sm_a[ (offset_k+2)*(M_sm)+(offset_m+2) ] = exp==0 ? RpL+b : RpL;
-      sm_a[ (offset_k+3)*(M_sm)+(offset_m+3) ] = exp==0 ? RpL+b : RpL;
+      float RpL = exp==0 ? arg.alpha*(factorR+factorL)+b : arg.alpha*(factorR+factorL);
+      float RmL = arg.alpha*(factorR-factorL);
+     
+      half2* A = reinterpret_cast<half2*>(sm_a);
+
+      A[ (offset_k+0)*(M_sm/2)+(offset_m+0) ] = __floats2half2_rn(RpL, 0.0f);
+      A[ (offset_k+0)*(M_sm/2)+(offset_m+1) ] = __floats2half2_rn(RmL, 0.0f);
       
-      // sm_a[ (offset_k+0)*(M_sm)+(offset_m+0) ] = factorR + factorL;
-      sm_a[ (offset_k+0)*(M_sm)+(offset_m+1) ] = 0.0f;
-      sm_a[ (offset_k+0)*(M_sm)+(offset_m+2) ] = RmL;
-      sm_a[ (offset_k+0)*(M_sm)+(offset_m+3) ] = 0.0f;
+      A[ (offset_k+1)*(M_sm/2)+(offset_m+0) ] = __floats2half2_rn(0.0f, RpL);
+      A[ (offset_k+1)*(M_sm/2)+(offset_m+1) ] = __floats2half2_rn(0.0f, RmL);
       
-      sm_a[ (offset_k+1)*(M_sm)+(offset_m+0) ] = 0.0f;
-      // sm_a[ (offset_k+1)*(M_sm)+(offset_m+1) ] = factorR + factorL;
-      sm_a[ (offset_k+1)*(M_sm)+(offset_m+2) ] = 0.0f;
-      sm_a[ (offset_k+1)*(M_sm)+(offset_m+3) ] = RmL;
+      A[ (offset_k+2)*(M_sm/2)+(offset_m+0) ] = __floats2half2_rn(RmL, 0.0f);
+      A[ (offset_k+2)*(M_sm/2)+(offset_m+1) ] = __floats2half2_rn(RpL, 0.0f);
       
-      sm_a[ (offset_k+2)*(M_sm)+(offset_m+0) ] = RmL;
-      sm_a[ (offset_k+2)*(M_sm)+(offset_m+1) ] = 0.0f;
-      // sm_a[ (offset_k+2)*(M_sm)+(offset_m+2) ] = factorR + factorL;
-      sm_a[ (offset_k+2)*(M_sm)+(offset_m+3) ] = 0.0f;
-      
-      sm_a[ (offset_k+3)*(M_sm)+(offset_m+0) ] = 0.0f;
-      sm_a[ (offset_k+3)*(M_sm)+(offset_m+1) ] = RmL;
-      sm_a[ (offset_k+3)*(M_sm)+(offset_m+2) ] = 0.0f;
-      // sm_a[ (offset_k+3)*(M_sm)+(offset_m+3) ] = factorR + factorL; 
+      A[ (offset_k+3)*(M_sm/2)+(offset_m+0) ] = __floats2half2_rn(0.0f, RmL);
+      A[ (offset_k+3)*(M_sm/2)+(offset_m+1) ] = __floats2half2_rn(0.0f, RpL);
     
       x += block_dim_x;
     }
@@ -298,18 +282,22 @@ namespace quda {
     }
   }
 
+  __device__ inline int permute(int n){
+    int n32 = n & 31;
+    return (n>>5)*32 + ((n32>>2)&1)*16 + (n32>>3)*4 + (n&3);
+  }
+
   // Actually does more than the function name suggests.
   // will find the maximum absolute value among the vector, scale that, and store to sm_b
   template<int N_sm_d2, bool acc, class Vector>
   __device__ inline void load_matrix_b_vector(const Vector& v, half2* sm_b, const float scale){
-    // static constexpr float H_MAX = 65504.0f; // Prevent the creation of NaN.
     #pragma unroll
     for(int spin = 0; spin < 4; spin++){
       #pragma unroll
       for(int color = 0; color < 3; color++){
         float real = __fdividef(v(spin, color).real(), scale); // real = real>H_MAX?H_MAX:real;
         float imag = __fdividef(v(spin, color).imag(), scale); // imag = imag>H_MAX?H_MAX:imag;
-        int idx = (threadIdx.y*4+spin)*N_sm_d2+3*threadIdx.x+color;
+        int idx = (threadIdx.y*4+spin)*N_sm_d2 + permute(3*threadIdx.x+color);
         if(acc){
           sm_b[idx] = __hadd2(sm_b[idx], __floats2half2_rn(real, imag));
         }else{
@@ -328,7 +316,7 @@ namespace quda {
     for(int spin = 0; spin < 4; spin++){
       #pragma unroll
       for(int color = 0; color < 3; color++){
-        int idx = (threadIdx.y*4+spin)*N_sm_d2+3*threadIdx.x+color;
+        int idx = (threadIdx.y*4+spin)*N_sm_d2+ + permute(3*threadIdx.x+color);
         __half_max_abs_half2__(max_, sm_b[idx]);
       }
     }
@@ -341,28 +329,28 @@ namespace quda {
     storage_vec* out = reinterpret_cast<storage_vec*>(output.field);
     half2 a, b;
 
-    a = __hmul2(sm_b[ (threadIdx.y*4+0)*N_sm_d2+3*threadIdx.x+0 ], max_i_div_max2_);
-    b = __hmul2(sm_b[ (threadIdx.y*4+0)*N_sm_d2+3*threadIdx.x+1 ], max_i_div_max2_);
+    a = __hmul2(sm_b[ (threadIdx.y*4+0)*N_sm_d2+permute(3*threadIdx.x+0) ], max_i_div_max2_);
+    b = __hmul2(sm_b[ (threadIdx.y*4+0)*N_sm_d2+permute(3*threadIdx.x+1) ], max_i_div_max2_);
     out[sid + 0*output.volumeCB] = __2half22integer4_rn<storage_vec>(a, b); 
     
-    a = __hmul2(sm_b[ (threadIdx.y*4+0)*N_sm_d2+3*threadIdx.x+2 ], max_i_div_max2_);
-    b = __hmul2(sm_b[ (threadIdx.y*4+1)*N_sm_d2+3*threadIdx.x+0 ], max_i_div_max2_);
+    a = __hmul2(sm_b[ (threadIdx.y*4+0)*N_sm_d2+permute(3*threadIdx.x+2) ], max_i_div_max2_);
+    b = __hmul2(sm_b[ (threadIdx.y*4+1)*N_sm_d2+permute(3*threadIdx.x+0) ], max_i_div_max2_);
     out[sid + 1*output.volumeCB] = __2half22integer4_rn<storage_vec>(a, b); 
     
-    a = __hmul2(sm_b[ (threadIdx.y*4+1)*N_sm_d2+3*threadIdx.x+1 ], max_i_div_max2_);
-    b = __hmul2(sm_b[ (threadIdx.y*4+1)*N_sm_d2+3*threadIdx.x+2 ], max_i_div_max2_);
+    a = __hmul2(sm_b[ (threadIdx.y*4+1)*N_sm_d2+permute(3*threadIdx.x+1) ], max_i_div_max2_);
+    b = __hmul2(sm_b[ (threadIdx.y*4+1)*N_sm_d2+permute(3*threadIdx.x+2) ], max_i_div_max2_);
     out[sid + 2*output.volumeCB] = __2half22integer4_rn<storage_vec>(a, b); 
     
-    a = __hmul2(sm_b[ (threadIdx.y*4+2)*N_sm_d2+3*threadIdx.x+0 ], max_i_div_max2_);
-    b = __hmul2(sm_b[ (threadIdx.y*4+2)*N_sm_d2+3*threadIdx.x+1 ], max_i_div_max2_);
+    a = __hmul2(sm_b[ (threadIdx.y*4+2)*N_sm_d2+permute(3*threadIdx.x+0) ], max_i_div_max2_);
+    b = __hmul2(sm_b[ (threadIdx.y*4+2)*N_sm_d2+permute(3*threadIdx.x+1) ], max_i_div_max2_);
     out[sid + 3*output.volumeCB] = __2half22integer4_rn<storage_vec>(a, b); 
     
-    a = __hmul2(sm_b[ (threadIdx.y*4+2)*N_sm_d2+3*threadIdx.x+2 ], max_i_div_max2_);
-    b = __hmul2(sm_b[ (threadIdx.y*4+3)*N_sm_d2+3*threadIdx.x+0 ], max_i_div_max2_);
+    a = __hmul2(sm_b[ (threadIdx.y*4+2)*N_sm_d2+permute(3*threadIdx.x+2) ], max_i_div_max2_);
+    b = __hmul2(sm_b[ (threadIdx.y*4+3)*N_sm_d2+permute(3*threadIdx.x+0) ], max_i_div_max2_);
     out[sid + 4*output.volumeCB] = __2half22integer4_rn<storage_vec>(a, b); 
     
-    a = __hmul2(sm_b[ (threadIdx.y*4+3)*N_sm_d2+3*threadIdx.x+1 ], max_i_div_max2_);
-    b = __hmul2(sm_b[ (threadIdx.y*4+3)*N_sm_d2+3*threadIdx.x+2 ], max_i_div_max2_);
+    a = __hmul2(sm_b[ (threadIdx.y*4+3)*N_sm_d2+permute(3*threadIdx.x+1) ], max_i_div_max2_);
+    b = __hmul2(sm_b[ (threadIdx.y*4+3)*N_sm_d2+permute(3*threadIdx.x+2) ], max_i_div_max2_);
     out[sid + 5*output.volumeCB] = __2half22integer4_rn<storage_vec>(a, b); 
   } 
 
@@ -440,7 +428,6 @@ namespace quda {
   __device__ inline void mma_sync_gemm(half* sm_a, half* sm_b, half* sm_c){
     constexpr int WMMA_M = 16;
     constexpr int WMMA_N = 16;
-    // constexpr int WMMA_K = 16;
     
     constexpr int tm_dim = M/WMMA_M;
     constexpr int tn_dim = N/WMMA_N;
@@ -449,15 +436,17 @@ namespace quda {
     
     static_assert( (tm_dim*tn_dim)%total_warp==0, "(tm_dim*tn_dim)%%total_warp==0\n" );
     static_assert( tn_dim%(tm_dim*tn_dim/total_warp)==0, "tn_dim%%(tm_dim*tn_dim/total_warp)==0\n" );
+    static_assert( N%64==0, "N%%64==0\n" );
     
     constexpr int total_tile = tm_dim*tn_dim;
     
     constexpr int warp_cycle = total_tile/total_warp;
-  
-    const int this_warp = (threadIdx.y*block_dim_x+threadIdx.x) >> 5; // warp_id
+
+    const int thread_num = threadIdx.y*block_dim_x+threadIdx.x; 
+    const int this_warp = thread_num >> 5; // warp_id
     const int warp_m = this_warp*warp_cycle/tn_dim;
 
-    const int lane_id = (threadIdx.y*block_dim_x+threadIdx.x) & 0x1f;
+    const int lane_id = thread_num & 0x1f;
     const int octl_id = (lane_id >> 2);
     const int quad_id = (octl_id & 0x3);
     const int quad_row = (quad_id & 1);
@@ -467,24 +456,7 @@ namespace quda {
 
     #pragma unroll
     for(int c = 0; c < warp_cycle; c++){
-#ifdef USE_REG
-      // registers to hold the accumulation c 
-      asm volatile(
-        "{.reg .f16x2 $rc0;\n\t"
-        " .reg .f16x2 $rc1;\n\t"
-        " .reg .f16x2 $rc2;\n\t"
-        " .reg .f16x2 $rc3;    "
-      );
-      // set them all the zero
-      asm volatile(
-        "mov.u32 $rc0, 0x0U;\n\t" 
-        "mov.u32 $rc1, 0x0U;\n\t" 
-        "mov.u32 $rc2, 0x0U;\n\t" 
-        "mov.u32 $rc3, 0x0U;    "
-      );
-#else
       unsigned rc[4] = {0x0u, 0x0u, 0x0u, 0x0u};
-#endif
       // The logical warp assigned to each part of the matrix.
       const int phys_warp_index = this_warp*warp_cycle+c;
       const int warp_n = phys_warp_index-warp_m*tn_dim;
@@ -495,52 +467,33 @@ namespace quda {
       
       #pragma unroll
       for( int k = 0; k < tm_dim; k++ ){
-        // const int a_row = warp_m*WMMA_M;
-        // const int a_col = k*WMMA_K;
-        // const int b_row = k*WMMA_K;
-        // const int b_col = warp_n*WMMA_N;
-           
         // performa the mma.sync
         #pragma unroll
         for(int kC = 0; kC < 4; kC++){
           unsigned* A = reinterpret_cast<unsigned*>(sm_a);
           unsigned* B = reinterpret_cast<unsigned*>(sm_b);
-          int thread_offset_a = (k*16 + kC*4 + quad_thread) * (M_sm/2) + warp_m*8 + quad_row*4 + quad_hilo*2;
-          int thread_offset_b = (k*16 + kC*4 + quad_thread) * (N_sm/2) + warp_n*8 + quad_col*4 + quad_hilo*2;
-          // int thread_offset_a = 0; 
-          // int thread_offset_b = 0; 
-#ifdef USE_REG
-          asm volatile("mma.sync.aligned.m8n8k4.col.row.f16.f16.f16.f16 {$rc0,$rc1,$rc2,$rc3}, {%0,%1}, {%2,%3}, {$rc0,$rc1,$rc2,$rc3};"
-            : : "r"(A[0]), "r"(A[1]), "r"(B[0]), "r"(B[1]));
-#else
+          int ldi = k*16 + kC*4 + quad_thread;
+          int thread_offset_a = ldi * (M_sm/2) + warp_m*8 + quad_row*4 + quad_hilo*2;
+          int thread_offset_b = ldi * (N_sm/2) + permute(warp_n*8 + quad_col*4 + quad_hilo*2);
           asm volatile(
               "mma.sync.aligned.m8n8k4.col.row.f16.f16.f16.f16 {%0,%1,%2,%3}, {%4,%5}, {%6,%7}, {%0,%1,%2,%3};"
             : "+r"(rc[0]), "+r"(rc[1]), "+r"(rc[2]), "+r"(rc[3])
             : "r"(A[thread_offset_a + 0]),  "r"(A[thread_offset_a + 1]),  
               "r"(B[thread_offset_b + 0]),  "r"(B[thread_offset_b + 1])
           );
-#endif
         }
       } 
     
       __syncthreads();
       
       unsigned* C = reinterpret_cast<unsigned*>(sm_c);
-      int thread_offset_c = (warp_m*16 + quad_row*8 + quad_hilo*4 + quad_thread) * (N_sm/2) + warp_n*8 + quad_col*4;
-      // int thread_offset_c = 0; 
+      int thread_offset_c = (warp_m*16 + quad_row*8 + quad_hilo*4 + quad_thread) * (N_sm/2) + permute(warp_n*8 + quad_col*4);
       
       // Now store the results to shared memory
-#ifdef USE_REG     
-      asm volatile("st.shared.u32 [%0], $rc0;\n\t" 
-                   "st.shared.u32 [%0], $rc1;\n\t" 
-                   "st.shared.u32 [%0], $rc2;\n\t" 
-                   "st.shared.u32 [%0], $rc3;}   " : : "l"(C) : "memory");
-#else
       #pragma unroll
       for(int i = 0; i < 4; i++){
         C[thread_offset_c + i] = rc[i];
       }
-#endif
     }
   } 
 
